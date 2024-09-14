@@ -1,0 +1,6 @@
+__pycache__/
+.ipynb_checkpoints/
+*.py[cod]
+*.swp
+trained_models/
+TOY.ipynb
