@@ -6,4 +6,4 @@ from datasets.permuting import (PermutingMNIST,
                                 PermutingFashionMNIST,
                                 PermutingCIFAR,
                                 PermutingSVHN)
-from datasets.class_incrementing import (IncrementingCIFAR)
+from datasets.class_incrementing import (IncrementingCIFAR, IncrementingCIFAR100)

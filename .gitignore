@@ -4,3 +4,6 @@ __pycache__/
 *.swp
 trained_models/
 TOY.ipynb
+data/
+ebms/
+exp_ebms/

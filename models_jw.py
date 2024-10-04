@@ -23,34 +23,35 @@ _quadruple = _ntuple(4, "_quadruple")
 
 
 class HashResNet(nn.Module):
-    def __init__(self, block, num_blocks, num_classes=10):
+    def __init__(self, block, num_blocks, device, num_classes=10):
+        self.device=device
         super(HashResNet, self).__init__()
         self.in_planes = 64
         self.C = num_classes
         self.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
         self.bn1 = nn.BatchNorm2d(64, affine=False, track_running_stats=False)
-        self.layer1 = nn.ModuleList(self._make_layer(block, 64, num_blocks[0], stride=1, period=10))
-        self.layer2 = nn.ModuleList(self._make_layer(block, 128, num_blocks[1], stride=2, period=10))
-        self.layer3 = nn.ModuleList(self._make_layer(block, 256, num_blocks[2], stride=2, period=10))
-        self.layer4 = nn.ModuleList(self._make_layer(block, 512, num_blocks[3], stride=2, period=10))
+        self.layer1 = nn.ModuleList(self._make_layer(block, 64, num_blocks[0], stride=1, period=10, device=device))
+        self.layer2 = nn.ModuleList(self._make_layer(block, 128, num_blocks[1], stride=2, period=10, device=device))
+        self.layer3 = nn.ModuleList(self._make_layer(block, 256, num_blocks[2], stride=2, period=10, device=device))
+        self.layer4 = nn.ModuleList(self._make_layer(block, 512, num_blocks[3], stride=2, period=10, device=device))
         self.linear = BinaryHashLinear(512*block.expansion,
 					  num_classes,
-				          10)
+				          10, device=device)
         self.cheat_period = 1000000
         self.time_slow = 20000
 
-    def _make_layer(self, block, planes, num_blocks, stride, period):
+    def _make_layer(self, block, planes, num_blocks, stride, period, device):
         strides = [stride] + [1]*(num_blocks-1)
         layers = []
         for stride in strides:
-            layers.append(block(self.in_planes, planes, period, stride))
+            layers.append(block(self.in_planes, planes, period, device, stride))
             self.in_planes = planes * block.expansion
         return layers
 
     def energy(self, z, y, x):
         return -self._forward(x, z)[0][0][y]
 
-    def _minimize_with_respect_to_z(self, x, y, lr=0.01, num_steps=20):
+    def _minimize_with_respect_to_z(self, x, y, z_lr=0.001, z_alpha=100, num_steps=20):
         losses = []
         #z = torch.concat([torch.ones(5, device="cuda", requires_grad=True)/5, torch.zeros(5, device="cuda")])
 
@@ -59,7 +60,7 @@ class HashResNet(nn.Module):
         z_opt = z[:5].clone().detach().requires_grad_(True)  # First 5 elements
         z_fixed = z[5:].clone().detach()  # Last 5 elements (no gradient)
 
-        optimizer = optim.SGD([z_opt], lr=lr)  # Optimize only the first 5 elements
+        optimizer = optim.SGD([z_opt], lr=z_lr)  # Optimize only the first 5 elements
         for _ in range(num_steps):
             optimizer.zero_grad()
     
@@ -67,20 +68,20 @@ class HashResNet(nn.Module):
             with torch.no_grad():
                 z_combined.clamp_(min=0, max=1)
 
-            loss = self.energy(z_combined, y.to("cuda"), x.unsqueeze(0).to("cuda"))
+            loss = self.energy(z_combined, y.to("cuda"), x.unsqueeze(0).to("cuda")) + z_alpha*torch.abs(z_combined).sum()
             loss.backward()
             optimizer.step()
             losses.append(loss.item())
             
         return z_combined, self.energy(z_combined.detach(), y.to("cuda"), x.to("cuda").unsqueeze(0)).detach(), losses
 
-    def forward(self, x, z=None):
+    def forward(self, x, z=None, z_lr=0.001, z_alpha=100):
         if z == None:
-            return self.optimize_z(x)
+            return self.optimize_z(x, z_lr, z_alpha)
         else:
             return self._forward(x, z)
 
-    def optimize_z(self, X):
+    def optimize_z(self, X, z_lr, z_alpha):
         z_pred_batch, y_pred_batch, loss_pred_batch = [], [], []
         for x in X:
             min_value = float('inf')
@@ -88,7 +89,7 @@ class HashResNet(nn.Module):
             y_pred = None
             for y in torch.arange(self.C):
                 debug = 1
-                z, e_min, losses = self._minimize_with_respect_to_z(x, y)
+                z, e_min, losses = self._minimize_with_respect_to_z(x, y, z_lr, z_alpha)
                 debug = 1
                 if e_min < min_value:
                     min_value = e_min
@@ -115,23 +116,23 @@ class HashResNet(nn.Module):
         out = self.linear(out, z)
         return out, z, []
 
-def HashResNet18(num_classes):
-    return HashResNet(HashBasicBlock, [2,2,2,2], num_classes=num_classes)
+def HashResNet18(num_classes, device="cpu"):
+    return HashResNet(HashBasicBlock, [2,2,2,2], device=device, num_classes=num_classes)
 
 class HashBasicBlock(nn.Module):
     expansion = 1
 
-    def __init__(self, in_planes, planes, period, stride=1):
+    def __init__(self, in_planes, planes, period, device, stride=1):
         super(HashBasicBlock, self).__init__()
-        self.conv1 = HashConv2d(in_planes, planes, 3, period, stride=stride, padding=1, bias=False)
+        self.conv1 = HashConv2d(in_planes, planes, 3, period, device=device, stride=stride, padding=1, bias=False)
         self.bn1 = nn.BatchNorm2d(planes, affine=False, track_running_stats=False)
-        self.conv2 = HashConv2d(planes, planes, 3, period, stride=1, padding=1, bias=False)
+        self.conv2 = HashConv2d(planes, planes, 3, period, device=device, stride=1, padding=1, bias=False)
         self.bn2 = nn.BatchNorm2d(planes, affine=False, track_running_stats=False)
 
         self.shortcut = nn.ModuleList()
         if stride != 1 or in_planes != self.expansion*planes:
             self.shortcut = nn.ModuleList(
-                [HashConv2d(in_planes, self.expansion*planes, 1, period, stride=stride, bias=False),
+                [HashConv2d(in_planes, self.expansion*planes, 1, period, device=device, stride=stride, bias=False),
                 nn.BatchNorm2d(self.expansion*planes, affine=False, track_running_stats=False)]
             )
 
@@ -148,36 +149,37 @@ class HashBasicBlock(nn.Module):
         return out
 
 class BinaryHashLinear(nn.Module):
-    def __init__(self, n_in, n_out, period, key_pick='hash', learn_key=True):
+    def __init__(self, n_in, n_out, period, device, key_pick='hash', learn_key=False):
         super(BinaryHashLinear, self).__init__()
         self.key_pick = key_pick
+        self.device = device
         w = nn.init.xavier_normal_(torch.empty(n_in, n_out))
         rand_01 = np.random.binomial(p=.5, n=1, size=(n_in, period)).astype(np.float32)
         o = torch.from_numpy(rand_01*2 - 1)
 
         self.w = nn.Parameter(w)
         self.bias = nn.Parameter(torch.zeros(n_out))
-        self.o = nn.Parameter(o).to("cuda")
+        self.o = nn.Parameter(o)#.to(self.device)
         if not learn_key:
             self.o.requires_grad = False
 
     def forward(self, x, z):
-        z_unsqueezed = z.unsqueeze(1).to("cuda")
-        o = (self.o @ z_unsqueezed).squeeze()
+        o = (self.o @ z.unsqueeze(1)).squeeze()
         m = x*o
         r = torch.mm(m, self.w)
         return r
     
 class HashConv2d(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, period, 
+    def __init__(self, in_channels, out_channels, kernel_size, period, device,
                 stride=1, padding=0, bias=True,
-                key_pick='hash', learn_key=True):
+                key_pick='hash', learn_key=False):
         super(HashConv2d, self).__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.kernel_size = _pair(kernel_size)
         self.stride = _pair(stride)
         self.padding = _pair(padding)
+        self.device = device
 
         w = torch.zeros(self.out_channels, self.in_channels, *self.kernel_size)
         nn.init.kaiming_normal_(w, mode='fan_out', nonlinearity='relu')
@@ -190,11 +192,10 @@ class HashConv2d(nn.Module):
         o_dim = self.in_channels*self.kernel_size[0]*self.kernel_size[1]
         # TODO(briancheung): The line below will cause problems when saving a model
         o = torch.from_numpy( np.random.binomial( p=.5, n=1, size = (o_dim, period) ).astype(np.float32) * 2 - 1 )
-        self.o = nn.Parameter(o, requires_grad=False).to("cuda")
+        self.o = nn.Parameter(o, requires_grad=False)
 
     def forward(self, x, z=None):
-        z_unsqueezed = z.unsqueeze(1).to("cuda")
-        o = (self.o @ z_unsqueezed).squeeze()
+        o = (self.o @ z.unsqueeze(1)).squeeze()
         o = o.view(1,
                 self.in_channels,
                 self.kernel_size[0],
